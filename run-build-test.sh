@@ -8,9 +8,11 @@ WORKSPACE="/workspace/nikolai/nextutils"
 # SPACES is an array of "space:runs" pairs, e.g. "space3:2" "space4:3"
 SPACES=()
 DEFAULT_RUNS=2
+SMTP_RELAY="10.12.27.16"
+SMTP_FROM="nikolai@nextsilicon.com"
 
 usage() {
-    echo "Usage: $0 --nexthome space3|space4[:N] [--nexthome space3|space4[:N]] ... [--runs N]"
+    echo "Usage: $0 --nexthome space3|space4[:N] [--nexthome space3|space4[:N]] ... [--runs N] [--slack-webhook URL]"
     echo ""
     echo "  --nexthome SPACE[:N]   Space to test, with optional per-space run count"
     echo "  --runs N               Default run count when not specified per-space (default: 2)"
@@ -48,6 +50,23 @@ for entry in "${SPACES[@]}"; do
 done
 
 # --- Helpers ---
+NOTIFY_EMAIL="nikola.ivanisevic@nextsilicon.com"
+
+notify() {
+    local subject="$1" body="$2"
+    curl -s -o /dev/null \
+        --url "smtp://${SMTP_RELAY}:25" \
+        --mail-from "$SMTP_FROM" \
+        --mail-rcpt "$NOTIFY_EMAIL" \
+        --upload-file - <<EOF
+From: nextutils-build-test <${SMTP_FROM}>
+To: ${NOTIFY_EMAIL}
+Subject: ${subject}
+
+${body}
+EOF
+}
+
 elapsed_s() {
     echo $(( $(date +%s) - $1 ))
 }
@@ -104,10 +123,31 @@ finalize() {
         echo "  CSV: $csv"
         echo "  Log: $log"
     done
+
+    # Slack finish notification
+    local notify_body=""
+    for csv in "${SESSION_CSVS[@]}"; do
+        local_space=$(basename "$csv" | sed 's/build-test-[0-9]*-//;s/\.csv//')
+        local ok failed
+        ok=$(tail -n +2 "$csv" | awk -F, '$5=="OK"' | wc -l)
+        failed=$(tail -n +2 "$csv" | awk -F, '$5=="FAILED"' | wc -l)
+        notify_body+="${local_space}: ${ok} OK, ${failed} FAILED\n"
+    done
+    notify "nextutils build test finished" "$(printf '%b' "$notify_body")"
 }
 trap finalize EXIT
 
 DATE=$(date +%Y%m%d)
+
+# Build a human-readable description of what will run
+_spaces_summary=""
+for entry in "${SPACES[@]}"; do
+    space="${entry%%:*}"
+    runs="${DEFAULT_RUNS}"
+    [[ "$entry" == *:* ]] && runs="${entry##*:}"
+    _spaces_summary+="${space}×${runs} "
+done
+notify "nextutils build test started" "Spaces: ${_spaces_summary% } | Host: $(hostname)"
 
 # --- Iterate over spaces ---
 for entry in "${SPACES[@]}"; do
